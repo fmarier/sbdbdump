@@ -9,6 +9,8 @@ import operator
 import sqlite3
 import struct
 
+import argparse
+
 # File format of .sbstore files:
 #
 # We do not store the add prefixes, those are retrieved by
@@ -53,8 +55,8 @@ import struct
 #    byte sliced (numSubPrefixes)   uint32 add chunk of SubPrefixes
 #    byte sliced (numSubPrefixes)   uint32 sub chunk of SubPrefixes
 #    byte sliced (numSubPrefixes)   uint32 SubPrefixes
-#    0...numAddCompletes            32-byte Completions
-#    0...numSubCompletes            32-byte Completions
+#    0...numAddCompletes            32-byte Completions + uint32 addChunk
+#    0...numSubCompletes            32-byte Completions + uint32 addChunk + uint32 subChunk
 #    16-byte MD5 of all preceding data
 
 class SBHash:
@@ -155,29 +157,40 @@ def read_bytesliced(fp, count):
         result.append(val)
     return result
 
-def read_sbstore(sbstorefile):
+def read_sbstore(sbstorefile, sbstorename, verbose):
     data = SBData()
     fp = open(sbstorefile, "rb")
 
-    # parse header
+    # parse header (32 (8 x 4) bytes)
     header = struct.Struct("=IIIIIIII")
     magic, version, num_add_chunk, num_sub_chunk, \
     num_add_prefix, num_sub_prefix, \
     num_add_complete, num_sub_complete = header.unpack_from(fp.read(header.size), 0)
-    print(("Magic %X Version %u NumAddChunk: %d NumSubChunk: %d "
+    print(("[%s] Magic %X Version %u NumAddChunk: %d NumSubChunk: %d "
            + "NumAddPrefix: %d NumSubPrefix: %d NumAddComplete: %d "
-           + "NumSubComplete: %d") % (magic, version, num_add_chunk,
+           + "NumSubComplete: %d") % (sbstorename, 
+                                      magic, version, num_add_chunk,
                                       num_sub_chunk, num_add_prefix,
                                       num_sub_prefix, num_add_complete,
                                       num_sub_complete))
 
-    # parse chunk data
+    # parse add/sub chunk numbers
+    verbose and print("[%s] AddChunks: " % (sbstorename), end="");
     for x in range(num_add_chunk):
         chunk = readuint32(fp)
         data.add_addchunk(chunk)
+        verbose and print("%d" % chunk, end="");
+        if x != num_add_chunk - 1:
+          verbose and print(",", end="");
+    verbose and print("");
+    verbose and print("[%s] SubChunks: " % (sbstorename), end="");
     for x in range(num_sub_chunk):
         chunk = readuint32(fp)
         data.add_subchunk(chunk)
+        verbose and print("%d" % chunk, end="");
+        if x != num_sub_chunk - 1:
+          verbose and print(",", end="");
+    verbose and print("");
 
     # read bytesliced data
     addprefix_addchunk = read_bytesliced(fp, num_add_prefix)
@@ -197,16 +210,29 @@ def read_sbstore(sbstorefile):
     for x in range(num_add_complete):
         complete = read_raw(fp, 32)
         addchunk = readuint32(fp)
+        # print addcomplete hashes
+        verbose and print("[%s] AddComplete[%d][%d]: " % (
+          sbstorename, addchunk, x), end="");
+        for byte in complete:
+          verbose and print("%02x" % (byte), end="");
+        verbose and print("");
+        #
         entry = SBHash(complete, addchunk)
         data.addcompletes.append(entry)
     for x in range(num_sub_complete):
         complete = read_raw(fp, 32)
         addchunk = readuint32(fp)
         subchunk = readuint32(fp)
+        # print subComplete hashes
+        print("[%s] SubComplete[%d][%d]: " % (
+          sbstorename, subchunk, x), end="");
+        for byte in complete:
+          print("%02x" % (byte), end="");
+        print("");
         entry = SBHash(complete, addchunk, subchunk)
         data.subcompletes.append(entry)
     md5sum = fp.read(16)
-    print("MD5: " + binascii.b2a_hex(md5sum))
+    print(("[%s] MD5: " + binascii.b2a_hex(md5sum)) % (sbstorename))
     # EOF detection
     dummy = fp.read(1)
     if len(dummy) or (len(md5sum) != 16):
@@ -245,7 +271,8 @@ def read_pset(filename):
     version = readuint32(fp)
     indexsize = readuint32(fp)
     deltasize = readuint32(fp)
-    print("Version: %X Indexes: %d Deltas: %d" % (version, indexsize, deltasize))
+    #print("Version: %X Indexes: %d Deltas: %d" % (
+    #  version, indexsize, deltasize))
     index_prefixes = []
     index_starts = []
     index_deltas = []
@@ -261,237 +288,44 @@ def read_pset(filename):
         prefixes = []
     return prefixes
 
-def parse_new_databases(dir):
+def parse_databases(dir, verbose):
     # look for all sbstore files
     sb_lists = {}
     for file in os.listdir(dir):
         if file.endswith(".sbstore"):
             sb_file = os.path.join(dir, file)
             sb_name = file[:-len(".sbstore")]
-            print("Reading " + sb_name)
-            sb_data = read_sbstore(sb_file)
+            print("- Reading sbstore: " + sb_name)
+            sb_data = read_sbstore(sb_file, sb_name, verbose);
             prefixes = read_pset(os.path.join(dir, sb_name + ".pset"))
             sb_data.name = sb_name
             sb_data.fill_addprefixes(prefixes)
             sb_data.sort_all_data()
             sb_lists[sb_name] = sb_data
             print("\n")
-    print("Found safebrowsing lists in new DB:")
+    # print list names found
     for name in sb_lists.keys():
-        print(name)
+        print("- Found list: %s" % name)
     return sb_lists
 
-def parse_old_database(dir):
-    filename = os.path.join(dir, "urlclassifier3.sqlite")
-    connection = sqlite3.connect(filename)
-    cursor = connection.cursor()
-    tables_query = "SELECT name, id FROM moz_tables"
-    cursor.execute(tables_query)
-    sb_names = {}
-    while True:
-        row = cursor.fetchone()
-        if not row: break
-        name, id = row[0], row[1]
-        sb_names[name] = id
-    cursor.close()
-    print("\nFound safebrowsing lists in old DB:")
-    for key in sb_names.keys():
-        print(key)
-    sb_lists = {}
-    for table_name in sb_names.keys():
-        table_id = sb_names[table_name]
-        data = SBData()
-        data.name = table_name
-
-        # Gather add prefixes
-        addpref_query = ("SELECT domain, partial_data, chunk_id "
-                         "FROM moz_classifier WHERE table_id = ?")
-        cursor = connection.cursor()
-        cursor.execute(addpref_query, (table_id,))
-        while True:
-            row = cursor.fetchone()
-            if not row: break
-            domain, prefix, addchunk = row[0], row[1], row[2]
-            if not prefix:
-                prefix = struct.unpack("=I", domain)[0]
-            else:
-                prefix = struct.unpack("=I", prefix)[0]
-            pref_data = SBHash(prefix, addchunk)
-            data.addprefixes.append(pref_data)
-            data.add_addchunk(addchunk)
-        cursor.close()
-
-        # Gather sub prefixes
-        subpref_query = ("SELECT domain, partial_data, chunk_id, "
-                         "add_chunk_id FROM moz_subs WHERE table_id = ?")
-        cursor = connection.cursor()
-        cursor.execute(subpref_query, (table_id,))
-        while True:
-            row = cursor.fetchone()
-            if not row: break
-            domain, prefix, subchunk, addchunk = \
-                row[0], row[1], row[2], row[3]
-            if not prefix:
-                prefix = struct.unpack("=I", domain)[0]
-            else:
-                prefix = struct.unpack("=I", prefix)[0]
-            pref_data = SBHash(prefix, addchunk, subchunk)
-            data.subprefixes.append(pref_data)
-            data.add_subchunk(subchunk)
-        cursor.close()
-        # Note that chunk count reported here is the real chunks we have
-        # data for. In reality we expect less chunks to exist in the prefix
-        # data due to knocking them out.
-        print("\nTable: %s\nAddChunks: %d SubChunks: %d AddPrefixes: %d " \
-              "SubPrefixes: %d" % (table_name, len(data.addchunks),
-                                   len(data.subchunks), len(data.addprefixes),
-                                   len(data.subprefixes)))
-        data.sort_all_data()
-        sb_names[table_name] = data
-    connection.close()
-    return sb_names
-
-def compare_chunks(old_table, new_table):
-    # Addchunks min/max, subchunks min/ax
-    old_set = [set(), set()]
-    new_set = [set(), set()]
-
-    for pref in old_table.addprefixes:
-        old_set[0].add(pref.addchunk)
-
-    for pref in old_table.subprefixes:
-        old_set[1].add(pref.subchunk)
-
-    for pref in new_table.addprefixes:
-        new_set[0].add(pref.addchunk)
-
-    for pref in new_table.subprefixes:
-        new_set[1].add(pref.subchunk)
-
-    if len(old_set[0]):
-        print("Old DB Add range: %d - %d" % (min(old_set[0]), max(old_set[0])))
-    if len(new_set[0]):
-        print("New DB Add range: %d - %d" % (min(new_set[0]), max(new_set[0])))
-        max_chunks = max(new_table.addchunks)
-        min_chunks = min(new_table.addchunks)
-        print("    DB Add range: %d - %d" % (min_chunks, max_chunks))
-
-    if len(old_set[1]):
-        print("Old DB Sub range: %d - %d" % (min(old_set[1]), max(old_set[1])))
-    if len(new_set[1]):
-        print("New DB Sub range: %d - %d" % (min(new_set[1]), max(new_set[1])))
-        max_chunks = max(new_table.subchunks)
-        min_chunks = min(new_table.subchunks)
-        print("    DB Sub range: %d - %d" % (min_chunks, max_chunks))
-
-    # Intersect real sets and reported sets, for addchunks
-    # Reported sets should be a superset of real sets
-    print(end="\n")
-    reported = new_table.addchunks
-    if not reported >= new_set[0]:
-        print("Reported sets not a superset of real sets")
-    fake_set = reported - new_set[0]
-    fake_list = list(fake_set)
-    fake_list.sort()
-    for chunk in fake_list:
-        print("Fake set %d" % chunk)
-    new_table.fake_add_chunks.update(fake_set)
-
-    print(end="\n")
-
-    return False
-
-def compare_table(old_table, new_table):
-    verbose = True
-
-    total_prefixes = 0
-    failed_prefixes = 0
-
-    # Compare AddPrefixes
-    old_addprefixes = set()
-    for pref in old_table.addprefixes:
-        old_addprefixes.add(pref)
-
-    new_addprefixes = set()
-    for pref in new_table.addprefixes:
-        new_addprefixes.add(pref)
-
-    total_prefixes += len(old_addprefixes)
-    symm_intersec = list(old_addprefixes ^ new_addprefixes)
-    symm_intersec.sort(key=operator.attrgetter('addchunk', 'prefix'))
-
-    failed_prefixes += len(symm_intersec)
-    print("%d add mismatches" % len(symm_intersec))
-
-    if verbose:
-        for pref in symm_intersec:
-            if pref in new_addprefixes:
-                print("No match AddPrefix new " + str(pref))
-            elif pref in old_addprefixes:
-                print("No match AddPrefix old " + str(pref))
-            else:
-                print("wut?")
-
-    # Compare SubPrefixes
-    old_subprefixes = set()
-    for pref in old_table.subprefixes:
-        old_subprefixes.add(pref)
-
-    new_subprefixes = set()
-    for pref in new_table.subprefixes:
-        new_subprefixes.add(pref)
-
-    total_prefixes += len(old_subprefixes)
-    symm_intersec = list(old_subprefixes ^ new_subprefixes)
-    symm_intersec.sort(
-        key=operator.attrgetter('subchunk', 'prefix', 'addchunk'))
-    failed_prefixes += len(symm_intersec)
-    print("%d sub mismatches" % len(symm_intersec))
-
-    if verbose:
-        for pref in symm_intersec:
-            if pref in new_subprefixes:
-                print("No match SubPrefix new " + str(pref), end="")
-                addchunk = pref.addchunk
-                if addchunk in new_table.addchunks:
-                    if addchunk in new_table.fake_add_chunks:
-                        print(", In FAKE Adds")
-                    else:
-                        print(", In Adds")
-                else:
-                    print(", Missing in Adds")
-            elif pref in old_subprefixes:
-                print("No match SubPrefix old " + str(pref))
-            else:
-                print("wut?")
-
-    print("Correct: %f%%"
-          % ((total_prefixes - failed_prefixes)*100.0/total_prefixes))
-    return failed_prefixes != 0
-
-def compare_all_the_things(new_lists, old_lists):
-    failure = False
-    for table in old_lists:
-        print("\nComparing table " + table)
-        old_data = old_lists[table]
-        new_data = new_lists[table]
-        failure |= compare_chunks(old_data, new_data)
-        failure |= compare_table(old_data, new_data)
-    return failure
-
 def main(argv):
-    new_profile_dir = argv.pop()
-    old_profile_dir = argv.pop()
-    new_lists = parse_new_databases(new_profile_dir)
-    old_lists = parse_old_database(old_profile_dir)
-    failure = compare_all_the_things(new_lists, old_lists)
-    if failure:
-        exit(1)
-    else:
-        exit(0)
+
+    parser \
+      = argparse.ArgumentParser(
+         description='Dump Firefox SafeBrowsing database files.')
+
+    parser.add_argument('--verbose', '-v', 
+      action='store_const', const=True, default=False, 
+      help='list database contents (prefixes/completes) in hex');
+
+    parser.add_argument('sbstore_dir', nargs=1, 
+      help='directory with safebrowsing database files. (.sbstore, .pset) Should be called \'safebrowsing\' under a Firefox profile directory');
+
+    args = parser.parse_args();
+
+    sbstore_dir = args.sbstore_dir[0];
+    parse_databases(sbstore_dir, args.verbose);
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Need to specify 2 profile directories.")
-        exit(1)
+
     main(sys.argv)
