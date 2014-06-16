@@ -207,12 +207,20 @@ def read_sbstore(sbstorefile, sbstorename, verbose):
                         subprefix_addchunk[i],
                         subprefix_subchunk[i])
         data.subprefixes.append(prefix)
+        # print sub hash prefixes
+        verbose and print("[%s] subPrefix[chunk:%d] " % (
+          sbstorename, subprefix_subchunk[i]), end="");
+        verbose and print("%02x" % ((subprefixes[i] & (0xFF << 24)) >> 24), end="");
+        verbose and print("%02x" % ((subprefixes[i] & (0xFF << 16)) >> 16), end="");
+        verbose and print("%02x" % ((subprefixes[i] & (0xFF <<  8)) >>  8), end="");
+        verbose and print("%02x" % ((subprefixes[i] & (0xFF <<  0)) >>  0), end="");
+        verbose and print("");
     for x in range(num_add_complete):
         complete = read_raw(fp, 32)
         addchunk = readuint32(fp)
-        # print addcomplete hashes
-        verbose and print("[%s] AddComplete[%d][%d]: " % (
-          sbstorename, addchunk, x), end="");
+        # print add complete hashes
+        verbose and print("[%s] addComplete[chunk:%d] " % (
+          sbstorename, addchunk), end="");
         for byte in complete:
           verbose and print("%02x" % (byte), end="");
         verbose and print("");
@@ -223,9 +231,9 @@ def read_sbstore(sbstorefile, sbstorename, verbose):
         complete = read_raw(fp, 32)
         addchunk = readuint32(fp)
         subchunk = readuint32(fp)
-        # print subComplete hashes
-        print("[%s] SubComplete[%d][%d]: " % (
-          sbstorename, subchunk, x), end="");
+        # print sub complete hashes
+        print("[%s] subComplete[chunk:%d]: " % (
+          sbstorename, subchunk), end="");
         for byte in complete:
           print("%02x" % (byte), end="");
         print("");
@@ -288,25 +296,38 @@ def read_pset(filename):
         prefixes = []
     return prefixes
 
-def parse_databases(dir, verbose):
+def parse_databases(dir, verbose, name, dry):
     # look for all sbstore files
     sb_lists = {}
     for file in os.listdir(dir):
         if file.endswith(".sbstore"):
             sb_file = os.path.join(dir, file)
             sb_name = file[:-len(".sbstore")]
+            if name != '' and name != sb_name:
+              continue;
             print("- Reading sbstore: " + sb_name)
+            if dry:
+              continue;
             sb_data = read_sbstore(sb_file, sb_name, verbose);
             prefixes = read_pset(os.path.join(dir, sb_name + ".pset"))
             sb_data.name = sb_name
             sb_data.fill_addprefixes(prefixes)
+            # print add hash prefixes
+            for addprefix in sb_data.addprefixes:
+              verbose and print("[%s] addPrefix[chunk:%d] " % (
+                sb_name, addprefix.addchunk), end="");
+              verbose and print("%02x" % ((addprefix.prefix & (0xFF << 24)) >> 24), end="");
+              verbose and print("%02x" % ((addprefix.prefix & (0xFF << 16)) >> 16), end="");
+              verbose and print("%02x" % ((addprefix.prefix & (0xFF <<  8)) >>  8), end="");
+              verbose and print("%02x" % ((addprefix.prefix & (0xFF <<  0)) >>  0), end="");
+              verbose and print("");
             sb_data.sort_all_data()
             sb_lists[sb_name] = sb_data
             print("\n")
     # print list names found
-    for name in sb_lists.keys():
-        print("- Found list: %s" % name)
-    return sb_lists
+    #for name in sb_lists.keys():
+    #    print("- Found list: %s" % name)
+    #return sb_lists
 
 def main(argv):
 
@@ -318,13 +339,20 @@ def main(argv):
       action='store_const', const=True, default=False, 
       help='list database contents (prefixes/completes) in hex');
 
+    parser.add_argument('--dry', '-n', 
+      action='store_const', const=True, default=False, 
+      help='dry run. list available databases and quit');
+
+    parser.add_argument('--name', nargs='?', default='', 
+      help='process only list named NAME');
+
     parser.add_argument('sbstore_dir', nargs=1, 
       help='directory with safebrowsing database files. (.sbstore, .pset) Should be called \'safebrowsing\' under a Firefox profile directory');
 
     args = parser.parse_args();
 
     sbstore_dir = args.sbstore_dir[0];
-    parse_databases(sbstore_dir, args.verbose);
+    parse_databases(sbstore_dir, args.verbose, args.name, args.dry);
 
 if __name__ == "__main__":
 
